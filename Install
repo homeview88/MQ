@@ -1,0 +1,1036 @@
+#!/bin/bash
+#
+#NAME                   WMQApplyMaintenance7_5.sh
+#
+#
+#SYNOPSIS               Script which installs MQ Base and/or a WMQ Patch. 
+#
+#
+#DESCRIPTION            Installs MQ and or a Patch. This script relies on the Binaries being available on SYSMDT/BL repeaters
+#						
+#
+#
+#OPTION                         -f -p <version>(Full MQ and Fix Pack Install)
+#								-p <version> Fix Pack install only
+#								-v version to be actioned e.g 7.5.0.2
+#								-i Client Install (needs to have the f and v flags specified)
+#                               -u Uninstall all of MQ, (supply a version for fixpack uninstall)
+#								-b backup /opt/mqm, /var/mqm and do a saveqmgr
+#								-d directory you want to do the Install/uninstall
+#								-n Number of the install
+#								-l build name for multiple installs
+#								-x Install Patch files for given FP level
+#								-x -u Uninstall Patch files for given FP level
+#
+#ENVIRONMENT VARIABLES
+#       Not applicable
+#
+#RETURN CODES
+#       0    Ok
+#       1    Errors
+#
+#EXAMPLE USAGE 
+#				WMQApplyMaintenance7_5.sh -v 7.5.0.3 -f -d /opt/mqm/7.5_1 -n 1 : Install full 7.5.0.3 as install 1, startup scripts and mq bash profile
+#				WMQApplyMaintenance7_5.sh -p -v 7.5.0.3    : Install FixPack 7.5.0.3 
+#				WMQApplyMaintenance7_5.sh -u -v 7.5.0.3 -l Installation1 -d /opt/mqm/7.5_2 -n 2  : Uninstall FixPack 7.5.0.3, reverts back to previously installed fixpack
+#				WMQApplyMaintenance7_5.sh -f -v 7.5.0.2 -i : Install client version of MQ
+#				WMQApplyMaintenance7_5.sh -p -v 7.5.0.2 -b : Install FixPack 7.5.0.2, backup up components to repeater
+#				WMQApplyMaintenance7_5.sh -x -v 7.5.0.3 -d /opt/mqm/7.5_1 -l Installation1 -n1 : Install Patch for fixpack
+#				WMQApplyMaintenance7_5.sh -x -v -u 7.5.0.3 -d /opt/mqm/7.5_1 -l Installation1 -n1 : Uninstall Patch for fixpack
+#						
+#NOTES
+#       the /tmp directory is used to store a temporary sorted version of the input files using naming standard:
+#       /tmp/${0}.`date +%Y%m%d%H%M%S`.${$}
+#       the files are tidied up following successful completion of the utility
+#
+
+#USER PROCEDURES
+
+MountSoftwareRepository(){
+	Logger "[SUMMARY]" "Mounting software server to:  ${REPEATER_WMQ_SOFTWARE}"
+	/usr/local/bin/MdtRepeaterInit.sh --mount --repeater-dir ${REPEATER_WMQ_SOFTWARE} --mount-name ${MOUNT_WMQ_SOFTWARE}
+	if [ $? -eq 0 ] ; then
+		cd ${MOUNT_WMQ_SOFTWARE}
+	else
+		Logger "[ERROR]" "Mount has not worked, exit processing!!!!!"
+		ExitProcedure 1 GETOPTS001 getopts "${MOUNT_WMQ_SOFTWARE} Mount has not worked, exit processing!!!!!"
+	fi
+}
+
+UnMountSoftwareRepository(){
+	Logger "[SUMMARY]" "Unmounting Software Server"
+	cd
+	/usr/local/bin/MdtRepeaterInit.sh --unmount --repeater-dir ${REPEATER_WMQ_SOFTWARE} --mount-name ${MOUNT_WMQ_SOFTWARE}
+	if [ ! $? -eq 0 ] ; then
+		Logger "[ERROR]" "!!!!!!!${MOUNT_WMQ_SOFTWARE} Unmount has not worked, Please investigate and unmount manually!!!!!!!"
+	fi
+}
+
+MountLogOutput(){
+	Logger "[SUMMARY]" "Mounting logging server to MDT Repeater Directory: ${REPEATER_WMQ_INSTALL} "
+	/usr/local/bin/MdtRepeaterInit.sh --mount --repeater-dir ${REPEATER_WMQ_INSTALL} --mount-name ${MOUNT_WMQ_INSTALL}
+	if [ $? -eq 0 ] ; then
+		cd ${MOUNT_WMQ_INSTALL}
+	else
+		Logger "[ERROR]" "Mount has not worked, exit processing!!!!!"
+		ExitProcedure 1 GETOPTS001 getopts "${MOUNT_WMQ_INSTALL} Mount has not worked, exit processing!!!!!"
+	fi	
+}
+
+UnMountLogOutput(){
+	Logger "[SUMMARY]" "Unmounting logging server"
+	cd
+	/usr/local/bin/MdtRepeaterInit.sh --unmount --repeater-dir ${REPEATER_WMQ_INSTALL} --mount-name ${MOUNT_WMQ_INSTALL}
+	if [ ! $? -eq 0 ] ; then
+		Logger "[ERROR]" "!!!!!!!${MOUNT_WMQ_INSTALL} Unmount has not worked, Please investigate and unmount manually!!!!!!!"
+	fi	
+}
+
+MountBackupRepository(){
+	Logger "[SUMMARY]" "Mounting software server to: ${REPEATER}: ${REPEATER_WMQ_BACKUP}"
+	/usr/local/bin/MdtRepeaterInit.sh --mount --repeater-dir ${REPEATER_WMQ_BACKUP} --mount-name ${MOUNT_WMQ_BACKUP}
+	if [ $? -eq 0 ] ; then
+		cd ${MOUNT_WMQ_BACKUP}
+	else
+		Logger "[ERROR]" "Mount has not worked, exit processing!!!!!"
+		ExitProcedure 1 GETOPTS001 getopts "${MOUNT_WMQ_BACKUP} Mount has not worked, exit processing!!!!!"
+	fi
+}
+
+UnMountBackupRepository(){
+	Logger "[SUMMARY]" "Unmounting Software Server"
+	cd
+	/usr/local/bin/MdtRepeaterInit.sh --unmount --repeater-dir ${REPEATER_WMQ_BACKUP} --mount-name ${MOUNT_WMQ_BACKUP}
+	if [ ! $? -eq 0 ] ; then
+		Logger "[ERROR]" "!!!!!!!${MOUNT_WMQ_BACKUP} Unmount has not worked, Please investigate and unmount manually!!!!!!!"
+	fi
+}
+
+CheckPreviousInstall(){
+	Logger "[SUMMARY]" "Check for previous installation(s) of WMQ in the specified directory"
+	rpmCount=`rpm -qa | grep "MQSeries" | grep -i "7.5"| sort | wc -l`
+	Logger "[SUMMARY]" "rpmCount is : ${rpmCount}" 
+	MountLogOutput
+	if [ ${rpmCount} -gt 0 ] ; then 
+		Logger "[SUMMARY]" "Lets look for all instances of dspmqver" 
+		dspmqvercounter=0
+		echo "Version,InstallPath,Installation Name, MultiInstanceCounter" > ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt
+		for dspmqverpath in `find /opt/mqm/ -name dspmqver | grep -v maintenance | grep -i ${DIRECTORY}` ; do 
+			dspmqvercounter=$[$(echo $dspmqvercounter) + 1]
+			Logger "[SUMMARY]" "Instance ${dspmqvercounter}:"
+			MQVERSION=`su - mqm -c "${dspmqverpath} -f2"`
+			INSTALLEDMAJORVERSION=`echo ${MQVERSION} | awk -F ":" '{ print $2 }' |  awk -F "." '{ print $1  }' | sed -e 's/^ *//' -e 's/ *$//'`
+			MQINSTALLEDPATH=`echo ${dspmqverpath} | awk -F "bin/dspmqver" '{ print $1 }'`
+			MQINSTALLEDVERSION=`echo ${MQVERSION} | awk -F ":" '{ print $2 }' | tr -d ' '`
+			INSTALLEDRELEASEVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $1"."$2 }'`
+			INSTALLEDMODIFICATIONVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $1"."$2"."$3 }'`
+			INSTALLEDFIXPACKVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $4 }'`
+			if [ "$INSTALLEDRELEASEVERSION" = "7.5" ] ; then
+				MQINSTALLATIONNAME=`su - mqm -c "${dspmqverpath} -f512 | tr -d ' ' |  sed 's/InstName://'"`
+			else
+				MQINSTALLATIONNAME="NOTKNOWN"
+			fi
+			Logger "[SUMMARY]" "MQ Installed - Version:${MQINSTALLEDVERSION} in Directory:${MQINSTALLEDPATH}, Installation Name: ${MQINSTALLATIONNAME}, Install Number: ${INSTALLNUMBER}";
+			echo "${MQINSTALLEDVERSION},${MQINSTALLEDPATH},${MQINSTALLATIONNAME},${multiinstallcounter}"  >> ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt
+		done
+		localMQInstalled="TRUE"
+	 else
+		Logger "[SUMMARY]" "MQ Not Installed"
+		echo -e "MQ Not Installed" >> ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt
+		localMQInstalled="FALSE"
+	fi
+	UnMountLogOutput
+}
+
+GetMQScripts(){
+	Logger "[SUMMARY]" "Getting the MQ scripts"
+	MountSoftwareRepository
+	mkdir -p ${LOCAL_WMQ_INSTALL}/scripts
+	cd /${LOCAL_WMQ_INSTALL}/scripts
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/MqInstall7_5.sh .
+	#cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/mqinstall .
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/MqInstallCtrl.sh .
+	#cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/MqInstall.cmd .
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/.bash_profile .
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/Messaging .
+
+	UnMountSoftwareRepository
+}
+
+ExtractIbmArchive() {
+    ARCHIVEFILE="${1}"
+    Logger "[SUMMARY]" "Extracting IBM archive file: ${ARCHIVEFILE}"
+    mkdir -p ${ARG_EXTRACTDIR}
+    cd ${ARG_EXTRACTDIR}
+   # tar -zxvf ${ARG_STAGEDIR}/${ARCHIVEFILE} 1>${DEBUG} 2>&1
+    gunzip ${ARG_STAGEDIR}/${ARCHIVEFILE} 
+    tar -zxvf ${ARG_STAGEDIR}/*.tar 
+}
+
+GetUsrLocalBin(){
+	Logger "[SUMMARY]" "Getting the latest bin.zip file."
+	MountSoftwareRepository
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/bin.zip /usr/local
+	cp -p ${MOUNT_WMQ_SOFTWARE}/scripts/svnunzip.sh /usr/local
+	UnMountSoftwareRepository
+	BuildLocalBin
+}
+
+GetMQBinaries(){
+	Logger "[SUMMARY]" "Getting MQ Binaries to the local server"
+	MountSoftwareRepository
+	mkdir -p ${LOCAL_WMQ_INSTALL}/binaries
+	cd ${LOCAL_WMQ_INSTALL}/binaries
+	Logger "[SUMMARY]" "Getting standard build for version ${localOSType}-bit/${MAJORVERSION}/${VERSION}."
+	cp -p ${MOUNT_WMQ_SOFTWARE}/binaries/LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/base/*.tar.gz ${LOCAL_WMQ_INSTALL}/binaries/
+	MQINSTALLFILE=`ls ${LOCAL_WMQ_INSTALL}/binaries/*.tar.gz | xargs basename`
+	UnMountSoftwareRepository 
+}
+
+GetMQFixPackBinaries(){
+	Logger "[SUMMARY]" "Getting FixPack Binaries to the local server"
+	mkdir -p ${LOCAL_WMQ_INSTALL}/binaries
+	cd ${LOCAL_WMQ_INSTALL}/binaries
+	Logger "[SUMMARY]" "Getting fixpack  build for version LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/fixpack/${MODIFICATIONVERSION}.*${localOSType}-FP*${FIXPACKVERSION}.tar.gz"
+	Logger "[SUMMARY]" "checking to see if the file exists first of all...."
+	MountSoftwareRepository
+	FIXPACKFILE=`ls ${MOUNT_WMQ_SOFTWARE}/binaries/LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/fixpack/${MODIFICATIONVERSION}*${localOSType}-FP*${FIXPACKVERSION}.tar.gz`
+	Logger "[SUMMARY]" "The Fixpack file we have found is : ${FIXPACKFILE}"
+	if [ ! "${FIXPACKFILE}" = "" ] ; then
+		Logger "[SUMMARY]" "We have found the FIXPACK File..."
+		Logger "[SUMMARY]" "Copying across the ${FIXPACKFILE} FixPack..."
+		cp -p $FIXPACKFILE ${LOCAL_WMQ_INSTALL}/binaries/
+		MQFixPackINSTALLFILE=`ls ${LOCAL_WMQ_INSTALL}/binaries/${MAJORVERSION}.*${localOSType}-FP*.tar.gz | xargs basename`
+	else
+		MQFixPackINSTALLFILE="NOFixPackFILE"
+	fi
+	UnMountSoftwareRepository
+	GetMQFixPackPatchFiles
+}
+
+GetMQFixPackPatchFiles(){
+	Logger "[SUMMARY]" "Checking for a Patch file for this FP release"
+	MountSoftwareRepository
+	Logger "[SUMMARY]" "the Patch file is ${MOUNT_WMQ_SOFTWARE}/binaries/LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/fixpack/patch/${VERSION}/install"
+	if [ -d ${MOUNT_WMQ_SOFTWARE}/binaries/LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/fixpack/patch/${VERSION} ] ; then
+		Logger "[SUMMARY]" "We have found a patch file for this fixpack...Downloading for manual install/uninstall......"
+		mkdir -p ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION}/install
+		mkdir -p ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION}/backout
+		cp -prf ${MOUNT_WMQ_SOFTWARE}/binaries/LINUX/${localOSType}-bit/${MAJORVERSION}/${RELEASEVERSION}/fixpack/patch/${VERSION}/* ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION}/
+	else
+		Logger "[SUMMARY]" "No Patch file found for this fixpack"
+	fi
+	UnMountSoftwareRepository
+}
+
+BuildLocalBin(){
+	Logger "[SUMMARY]" "Extracting /usr/local/bin"
+	cd /usr/local;
+	/usr/local/svnunzip.sh /usr/local/bin.zip
+	export PATH=${PATH}:/usr/local/bin/
+}
+
+InstallMQBase(){
+	Logger "[SUMMARY]" "Install Base MQ"
+	Logger "[SUMMARY]" "Check to see if we have the TAR file available......"
+	if [ -e ${LOCAL_WMQ_INSTALL}/binaries/${MQINSTALLFILE} ] ; then
+		Logger "[SUMMARY]" "We have the base TAR file, installing..."
+		cd ${LOCAL_WMQ_INSTALL}/scripts/
+		if [ -n ${DIRECTORY} ] ; then
+			Logger "[SUMMARY]" "Installing MQ into ${DIRECTORY}"
+			Logger "[SUMMARY]" "Installing Base Version ${INSTALLNUMBER}"
+			./MqInstall7_5.sh -s "${LOCAL_WMQ_INSTALL}/binaries/" -b "${MQINSTALLFILE}" -d "${DIRECTORY}" -v ${INSTALLNUMBER}
+		else
+			Logger "[SUMMARY]" "Installing MQ into default directory /opt/mqm/"
+			./MqInstall7_5.sh -s "${LOCAL_WMQ_INSTALL}/binaries/" -b "${MQINSTALLFILE}" -v ${INSTALLNUMBER}
+		fi
+		if [ "${?}" = "0" ]; then
+			Logger "[SUMMARY]" "MQ Install returned a zero code All OK "
+		else
+			ExitProcedure 1 WMQAPPLYMAINTENANCE001 InstallMQBase "MQ Install returned a non zero code - please investigate - exiting rest of script"
+		fi
+		if [ "${INSTALLNUMBER}" = "1" ] ; then
+			Logger "[SUMMARY]" "Setting Primary Install value as it is install 1....."
+			${DIRECTORY}/bin/setmqinst -i -p ${DIRECTORY}
+		else
+			Logger "[SUMMARY]" "NOT Setting Primary Install value....."
+		fi
+		Logger "[SUMMARY]" "Removing Base Tar file"
+		rm -rf ${LOCAL_WMQ_INSTALL}/binaries/*.tar
+	else
+		Logger "[SUMMARY]" "We DONT have the base TAR file...Not doing anything!!!!"
+	fi
+}
+
+InstallMQFixPack(){
+	Logger "[SUMMARY]" "Installing MQ FixPack"
+	Logger "[SUMMARY]" "Check to see if we have the TAR file available......"
+	if [ -e ${LOCAL_WMQ_INSTALL}/binaries/${MQFixPackINSTALLFILE} ] ; then
+		Logger "[SUMMARY]" "We have the FixPack TAR file, installing..."
+		cd ${LOCAL_WMQ_INSTALL}/scripts/
+		Logger "[SUMMARY]" "Install File is: ${MQFixPackINSTALLFILE}"
+		ls -lrt ${LOCAL_WMQ_INSTALL}/binaries
+		./MqInstall7_5.sh -s "${LOCAL_WMQ_INSTALL}/binaries" -c "${MQFixPackINSTALLFILE}" -d "${DIRECTORY}" -v "${INSTALLNUMBER}"
+		if [ "${?}" = "0" ]; then
+			Logger "[SUMMARY]" "MQ Install returned a zero code All OK "
+			InstallMQPatch
+			rc=$?
+			if [ $rc -gt 0 ] ; then
+				Logger "[ERROR]" "Could not install patch files.....exiting...check error logs and do another install...EVERYTHING is stopped!!!"
+				BuildIssuesString "Could not install patch files.....exiting...check error logs and do another install...EVERYTHING is stopped!!!"
+				LOG_ACTIONSTATUS="FAILURE"
+				ExitProcedure 1 WMQAPPLYMAINTENANCE002 InstallMQFixPack "Could not install patch files.....exiting...check error logs and do another install...EVERYTHING is stopped!!!"
+				return 1
+			else
+				Logger "[SUMMARY]" "install_${VERSION}_patch.sh script executed succesfully!!"
+				return 0
+			fi
+		else
+			ExitProcedure 1 WMQAPPLYMAINTENANCE002 InstallMQFixPack "MQ Install returned a non zero code - please investigate - exiting rest of script"
+		fi
+	else
+		Logger "[SUMMARY]" "We DONT have the FixPack TAR file...Not doing anything!!!!"
+	fi
+}
+
+InstallMQPatch(){
+	Logger "[SUMMARY]" "Installing MQ patch if it exists........"
+	if [ -e ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION} ] ; then
+		Logger "[SUMMARY]" "We have a patch file to install....."
+		Logger "[SUMMARY]" "Checking to ensure we the FP version installed......"
+		if [ `rpm -qa | grep -i MQSeries | grep ${VERSION} | wc -l` -gt 0 ]  ; then
+			cd ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION}
+			./install_${VERSION}_patch.sh ${DIRECTORY}
+			rc=$?
+			if [ $rc -gt 0 ] ; then
+				Logger "[ERROR]" "There has been a problem with the install_${VERSION}_patch.sh script on ${DIRECTORY}.....please investigate...."
+				return 1
+			else
+				Logger "[SUMMARY]" "install_${VERSION}_patch.sh script executed succesfully on ${DIRECTORY} !!"
+				return 0
+			fi
+		else
+			Logger "[ERROR]" "We have no rpm installations for MQ Fixpack ${VERSION}, - we cannot apply the patch files!!!!!"
+			OkToProcess="FALSE"
+			ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We have no rpm installations for MQ Fixpack ${VERSION}, - we cannot apply the patch files!!!!!"
+		fi
+	else
+		Logger "[SUMMARY]" "We have no patch file to install....."
+	fi
+}
+
+UnInstallMQPatch(){
+	Logger "[SUMMARY]" "UnInstalling MQ patch if it exists........"
+	GetMQFixPackPatchFiles
+	if [ -e ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION} ] ; then
+		Logger "[SUMMARY]" "We have a patch file to uninstall....."
+		cd ${LOCAL_WMQ_INSTALL}/binaries/patch/${VERSION}
+		./backout_${VERSION}_patch.sh ${DIRECTORY}
+		rc=$?
+		if [ $rc -gt 0 ] ; then
+			Logger "[ERROR]" "There has been a problem with the backout_${VERSION}_patch.sh script on ${DIRECTORY}.....please investigate...."
+			return 1
+		else
+			Logger "[SUMMARY]" "backout_${VERSION}_patch.sh script executed succesfully on ${DIRECTORY}!!"
+			return 0
+		fi
+	else
+		Logger "[SUMMARY]" "We have no patch file to uninstall....."
+	fi
+}
+
+UninstallMQ(){
+	Logger "[SUMMARY]" "Remove all of MQ for installation  ${INSTALLATIONNAME}...."
+	GetLocalOSType
+	CheckPreviousInstall
+	if [ "${localMQInstalled}" = "FALSE" ] ; then
+		MQUninstalled=TRUE
+	else
+		Logger "[SUMMARY]" "Lets check to see if we can install this version by Installation name..."
+		MountLogOutput
+		cat ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt | grep -i ${INSTALLATIONNAME}
+		if [ `cat ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt | grep ${INSTALLATIONNAME} | wc -l` -gt 0 ] ; then
+				Logger "[Summary]" "Installation found, continuing with the Uninstall..."
+				InstalledPath=
+				OkToProcess="TRUE"
+			else
+				Logger "[ERROR]" "No Installation, exiting the Uninstall..."
+				OkToProcess="FALSE"
+				UnMountLogOutput
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE} as we do not have an installation named: ${INSTALLATIONNAME}"
+			fi
+		UnMountLogOutput
+		Logger "[SUMMARY]" "We have found a previous install....Lets Back up the queue managers that are associated with this install/var/mqm"
+		#. /opt/mqm/7.5.0.3/bin/setmqenv -s
+		BackupVarMqm
+		GetMQScripts
+		#StopMessagingComponents
+		cd ${LOCAL_WMQ_INSTALL}/scripts/
+		export PATH=${PATH}:/usr/local/bin/
+		
+		#./MqInstall7_5.sh -f
+		
+		if [ "${?}" = "0" ]; then
+			Logger "[SUMMARY]" "MQ UnInstall returned a zero code All OK "
+		else
+			ExitProcedure 1 WMQAPPLYMAINTENANCE003 UnInstallMQ "MQ UnInstall returned a non zero code - please investigate - exiting rest of script"
+		fi
+		#check to make sure we have uninstalled all of MQ
+		CheckPreviousInstall
+		if [ "${localMQInstalled}" = "FALSE" ] ; then
+			Logger "[SUMMARY]" "MQ Uninstalled Sucessfully...."
+			MQUninstalled=TRUE
+		else
+			Logger "[SUMMARY]" "Lets try and remove items individually....."
+			for rpm in `rpm -qa | grep -i MQSeries` ; do
+				rpmlist=`echo ${rpmlist} ${rpm}`	
+			done
+			Logger "[SUMMARY]" "rpm list being deleted is ${rpmlist}."
+			rpm -ev ${rpmlist}
+		fi
+	fi
+}
+
+UninstallMQFixPack(){
+	Logger "[SUMMARY]" "Remove MQ Fixpack ${1}"
+	GetLocalOSType
+	CheckPreviousInstall
+	if [ "${localMQInstalled}" = "FALSE" ] ; then
+		MQUninstalled=TRUE
+	else
+		Logger "[SUMMARY]" "We have found a previous install....Lets Back up the queue managers and /var/mqm"
+		BackupVarMqm
+		Logger "[SUMMARY]" "The installed version of MQ is ${MQINSTALLEDVERSION}"
+		Logger "[SUMMARY]" "Lets try and remove the FP items individually...grepping for ...${1}"
+		if [ "${INSTALLNUMBER}" = "1" ] ; then
+			for rpm in `rpm -qa | grep -i MQSeries | grep ${1}` ; do
+				rpmlist=`echo ${rpmlist} ${rpm} | tr ' ' '\n'`	
+			done
+		else
+			for rpm in `rpm -qa | grep -i MQSeries | grep ${1} | grep "_${INSTALLNUMBER}"` ; do
+				rpmlist=`echo ${rpmlist} ${rpm} | tr ' ' '\n'`	
+			done
+		fi
+		Logger "[SUMMARY]" "rpm list being deleted is ${rpmlist}."
+		if [ "${rpmlist}" != "" ] ; then
+			#StopMessagingComponents
+			UnInstallMQPatch
+			rc=$?
+			if [ $rc -gt 0 ] ; then
+				Logger "[ERROR]" "Could not backout patch files so not removing Fixpack!!!!...exiting..."
+				BuildIssuesString "Could not backout patch files so not removing Fixpack!!!!...exiting..."
+				LOG_ACTIONSTATUS="FAILURE"
+				ExitProcedure 1 WMQAPPLYMAINTENANCE002 UninstallMQFixPack "Could not backout patch files so not removing Fixpack!!!!...exiting..."
+			fi
+			Logger "[SUMMARY]" "Removing ${1} packages......"
+			Logger "[SUMMARY]" "${rpmlist}"
+			`rpm -ev ${rpmlist}`
+			rc=${?}
+			if [ "${rc}" = "0" ] ; then
+				Logger "[SUMMARY]" "Checking to see if we have any more files remaining in the install dir, if not delete the instance from the ini file."
+				if [ "$(ls -A ${DIRECTORY})" ]; then
+					echo "******${DIRECTORY} is not Empty, not removing entry in /etc/opt/mqm/mqinst.ini********"
+				else
+					echo "${DIRECTORY} is Empty, removing instance in /etc/opt/mqm/mqinst.ini"
+					dltmqinst -p ${DIRECTORY}
+				fi
+				LOG_ACTIONSTATUS="SUCCESS"
+			else
+				LOG_ACTIONSTATUS="FAILURE"
+				BuildIssuesString "Return code from rpm -ev "${rpmlist}" was ${rc}."
+			fi
+		else
+			Logger "[ERROR]" "We have no rpm installations for MQ Fixpack ${1}, current installed version is ${MQINSTALLEDVERSION}"
+			BuildIssuesString "We have no rpm installations for MQ Fixpack ${1}, current installed version is ${MQINSTALLEDVERSION}"
+			LOG_ACTIONSTATUS="FAILURE"
+		fi
+	fi
+}
+
+RemoveServerRPMs(){
+	Logger "[SUMMARY]" "This must be a Client install so we are removing the MQSeriesServer.. rpms"
+	rpm -ev `rpm -qa | grep "MQSeriesServer"`
+
+}
+RemoveInstallItems(){
+	Logger "[SUMMARY]" "Remove Install Packages"
+	cd ${LOCAL_WMQ_INSTALL}
+
+	rm -rf ${LOCAL_WMQ_INSTALL}/binaries
+	rm -rf ${LOCAL_WMQ_INSTALL}/scripts
+
+	cd /home/mqm
+
+	Logger "[SUMMARY]" "Install Packages removed"
+}
+
+CheckInstallSpace(){
+	Logger "[SUMMARY]" "Checking space requirements in /software....."
+	softwareSize=`df -k  /software | grep -vE '^Filesystem|tmpfs|cdrom|mapper' | awk '{ print $3 }'`
+	Logger "[SUMMARY]" "/software filesystem available size is ${softwareSize}"
+	if [ ${softwareSize} -lt 1572864 ] ; then
+		Logger "[ERROR]" "FileSystem size = ${softwareSize} kb, this is below required size (1.5GB)....EXITING INSTALL!!!!!!!!!"
+		softwareSize=NotOK
+	else
+		Logger "[SUMMARY]" "FileSystem size = ${softwareSize} kb, this is OK :required size (1.5GB)...Continuing with install"
+		softwareSize=OK
+	fi
+}		
+
+MQInstall(){
+	Logger "[SUMMARY]" "Installing MQ and FixPack"
+	CheckInstallSpace
+	if [ "${softwareSize}" = "OK" ] ; then
+		GetLocalOSType
+		GetMQScripts
+		GetMQBinaries
+		GetMQFixPackBinaries
+		#StopMessagingComponents
+		InstallMQBase
+		InstallMQFixPack
+		AddMQBashProfile
+		if [ "${remoteMQInstallType}" = "CLIENT" ] ; then
+			RemoveServerRPMs
+		else 
+			BuildMQStartScripts
+			#StartMessagingComponents
+		fi
+		ApplyMQSecurity
+	else
+		BuildIssuesString "Not enough Space available for install in /software!!!"
+		ExitProcedure 1 WMQAPPLYMAINTENANCE002 MQInstall "Not enough Space available for install in /software!!! - exiting rest of script"
+	fi
+}
+
+BuildMQStartScripts(){
+	Logger "[SUMMARY]" "Building MQ Start scripts for new install........."
+	if [ -e /etc/rc.d/init.d/Messaging ] ; then
+		Logger "[SUMMARY]" "We already have the startup script installed for Messaging...not copying across a new one."
+	else
+		cp -f ${LOCAL_WMQ_INSTALL}/scripts/Messaging /etc/rc.d/init.d/
+		chown root:root /etc/rc.d/init.d/Messaging
+		chmod 755 /etc/rc.d/init.d/Messaging
+	fi
+	
+	export MYSCRIPT=`basename ${0}`
+	SERVER=`hostname`
+	Logger "[SUMMARY]" "Updating initd ${SERVER}"
+	Logger "[SUMMARY]" "Adding new version of startup script....."
+	/sbin/chkconfig --del Messaging
+	/sbin/chkconfig --add Messaging
+	/sbin/chkconfig Messaging on
+	
+	touch /var/lock/subsys/Messaging
+}
+
+RestartQM(){
+	Logger "[SUMMARY]" "Restarting queue manager......"
+	Logger "[SUMMARY]" "Stopping QMGR's........."
+	su - mqm -c "/usr/local/bin/QMgrCtrl.sh -m ALL -ec"
+	Logger "[SUMMARY]" "Starting QMGR's........."
+	su - mqm -c "/usr/local/bin/QMgrCtrl.sh -m ALL -s"
+	Logger "[SUMMARY]" "Restart Finished........."
+}
+
+AddMQBashProfile(){
+	if [ ! -e /home/mqm/.bash_profile ] ; then
+		Logger "[SUMMARY]" "MQ Bash profile does not exist in /home/mqm - copy across from repository..."
+		cp -f ${LOCAL_WMQ_INSTALL}/scripts/.bash_profile /home/mqm/.bash_profile
+		chown mqm:mqm /home/mqm/.bash_profile
+	else
+		Logger "[SUMMARY]" " We already have a /home/mqm/.bash_profile - not doing anything here!!!"
+	fi
+}
+
+ApplyMQSecurity(){
+	Logger "[SUMMARY]" "Setting the mqm password....."
+	echo "%R2g~@qf9*" | passwd --stdin mqm
+}
+
+GetLocalOSType(){
+	Logger "[SUMMARY]" "Getting Local OS Type either 32 bit or 64 bit..."
+	localOSType=`uname -a | grep _64 | wc -l`
+	if [ ${localOSType} -gt 0 ] ; then
+			localOSType=64
+	else
+			localOSType=32
+	fi
+	Logger "[SUMMARY]" "Local OS TYPE is ${localOSType}."
+}
+
+
+PatchMQ(){
+	Logger "[SUMMARY]" "We are doing a Patch......"
+	CheckInstallSpace
+	if [ "${softwareSize}" = "OK" ] ; then
+		GetLocalOSType
+		Logger "[SUMMARY]" "What version do we have already and which version are we going to?..."
+		CheckPreviousInstall
+		if [ "${localMQInstalled}" = "TRUE" ] ; then
+			BackupVarMqm
+		fi
+		GetMQScripts
+		GetMQFixPackBinaries
+		#StopMessagingComponents
+		InstallMQFixPack
+		#StartMessagingComponents
+	else
+		BuildIssuesString "Not enough Space available for install in /software!!!"
+		ExitProcedure 1 WMQAPPLYMAINTENANCE002 PatchMQ "Not enough Space available for install in /software!!! - exiting rest of script"
+	fi
+}
+
+BackupVarMqm(){		
+	if [ "${BACKUP}" = "true" ] ; then
+		Logger "[SUMMARY]" "Tarring up /var/mqm....."
+		MountBackupRepository
+		mkdir -p ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/
+		tar -cvf ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/varmqm.tar /var/mqm/exits/ /var/mqm/exits64/ /var/mqm/mqclient.ini /var/mqm/qmgrs/ /var/mqm/mqs.ini /var/mqm/log/ /var/mqm/errors/  --exclude='/var/mqm/errors/*FDC' --exclude='/var/mqm/core*' --exclude='/var/mqm/*zip'
+		
+		Logger "[SUMMARY]" "Zipping up tar file........"
+		if [ -e ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/varmqm.tar.gz ] ; then
+			Logger "[SUMMARY]" "We have an existing file with the same name - renaming...."
+			mv ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/varmqm.tar.gz ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/varmqm.tar.gz.`date +%Y%m%d%H%M%S` 
+		fi
+		gzip ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/varmqm.tar
+		
+		Logger "[SUMMARY]" "Tarring up ${DIRECTORY}....."
+		tar -cvf ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/optmqm.tar /opt/mqm --exclude='/opt/mqm/scripts/*' --exclude='/opt/mqm/scripts' --exclude='/opt/mqm/*.gz' --exclude='/opt/mqm/*.tar' --exclude='/opt/mqm/*.qload'
+		Logger "[SUMMARY]" "Zipping up tar file........"
+		if [ -e ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/optmqm.tar.gz ] ; then
+			Logger "[SUMMARY]" "We have an existing optmqm.tar.gz file with the same name - renaming...."
+			mv ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/optmqm.tar.gz ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/optmqm.tar.gz.`date +%Y%m%d%H%M%S` 
+		fi
+		gzip ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/optmqm.tar
+			
+		for qmgr in `dspmq |  grep QMNAME | awk -F "STATUS" '{ print $1 }' | sed 's/QMNAME(//g' | sed 's/)//g' | sed 's/ //g'` ; do
+			Logger "[SUMMARY]" "creating the following direcory: ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/${qmgr}"
+			mkdir -p  ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/${qmgr}
+			chmod 777 ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/${qmgr}
+			Logger "[SUMMARY]" "Qmgr to backup is : " ${qmgr}
+			su - mqm -c "saveqmgr -m ${qmgr} -f ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/${qmgr}/saveqmgr_${qmgr}.mqsc -1 -z ${MOUNT_WMQ_BACKUP}/${HOSTNAME}/${qmgr}/saveqmgr_${qmgr}.auth"
+		done
+		UnMountBackupRepository
+	else
+		Logger "[SUMMARY]" "Not Performing any backups as no Backup Flag specified...."
+	fi
+}
+
+ClientMQ(){
+	remoteMQInstallType=CLIENT
+	MQInstall
+}
+
+BuildIssuesString(){
+	LOG_ISSUES_STRING=`echo ${LOG_ISSUES_STRING} ${1}`	
+}
+
+LogOutput(){
+	Logger "[SUMMARY]" "Logging out results to repository server....."
+	LOG_DATETIME=`date`
+	MountLogOutput
+	mkdir -p ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/
+	cd ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/
+	if [ -e ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/WMQMaintResults.txt ] ; then
+		Logger "[SUMMARY]" "Results file already exists so we will append to it..."
+	else
+		Logger "[SUMMARY]" "Results file does not exist so creating one..."
+		echo "DateTime,Action Type,Action Status,Issues" > ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/WMQMaintResults.txt
+	fi
+	echo -e "${LOG_DATETIME},${LOG_ACTIONTYPE},${LOG_ACTIONSTATUS},${LOG_ISSUES_STRING}" | grep -v '^$' >> ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/WMQMaintResults.txt
+	UnMountLogOutput
+	echo -e "${LOG_DATETIME},${LOG_ACTIONTYPE},${LOG_ACTIONSTATUS},${LOG_ISSUES_STRING}"  | grep -v '^$'
+}
+
+StartMessagingComponents(){
+	Logger "[SUMMARY]" "Starting any mqm processes via the MessagingCtrl.sh script."
+	/usr/local/bin/MessagingCtrl.sh -a start
+}
+
+StopMessagingComponents(){
+	Logger "[SUMMARY]" "Stoppping any mqm processes via the MessagingCtrl.sh script."
+	/usr/local/bin/MessagingCtrl.sh -a stop
+}
+
+IsOKToProcess(){
+	IsOKToProcess="FALSE"
+	Logger "[SUMMARY]" "Lets check to see of we are ok to contiue with processing......."
+	CheckPreviousInstall
+	if [ "${localMQInstalled}" = "FALSE" ] ; then
+		# Logger "[SUMMARY]" "We are doing a $LOG_ACTIONTYPE on ${MQINSTALLEDVERSION}"
+		# export INSTALLEDMAJORVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $1 }'`
+		# export INSTALLEDRELEASEVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $1"."$2 }'`
+		# export INSTALLEDMODIFICATIONVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $1"."$2"."$3 }'`
+		# export INSTALLEDFIXPACKVERSION=`echo ${MQINSTALLEDVERSION} | awk -F "." '{ print $4 }'`
+		Logger "[SUMMARY]" "We are doing a $LOG_ACTIONTYPE with no previous MQ installed"
+	fi
+	
+    case ${LOG_ACTIONTYPE} in
+	UNINSTALL-FULL)
+		#Check to see if we have a version to install and also an installation name
+		Logger "[SUMMARY]" "This is a UNINSTALL-FULL"
+		if  [ "${localMQInstalled}" = "TRUE" ] ; then
+			Logger "[SUMMARY]" "We have install(s) of MQ - Lets Check if its the valid to uninstall ."
+			MountLogOutput
+			if [ `cat ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt | grep ${INSTALLATIONNAME} | wc -l` -eq 0 ] ; then
+				Logger "[ERROR]" "We cannot do an UNINSTALL as we have no installation with name ${INSTALLATIONNAME} installed - Exiting script!!!!!"
+				OkToProcess="FALSE"
+				UnMountLogOutput
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do an UNINSTALL as we have no installation with name ${INSTALLATIONNAME} installed - Exiting script!!!!!"
+			else
+				OkToProcess="TRUE"
+				UnMountLogOutput
+			fi
+		else
+			OkToProcess="FALSE"
+			ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE} as we have no installed versions of MQ."
+		fi
+	;;
+	FULLBUILD-${VERSION})
+		Logger "[SUMMARY]" "This is a FULLBUILD-${VERSION}"
+		#Check to see if there is not already a full build
+		if  [ "${localMQInstalled}" = "TRUE" ] ; then 
+			Logger "[SUMMARY]" "Lets check to see if we have an install already in this dir...."
+			MountLogOutput
+			if [ `cat ${MOUNT_WMQ_INSTALL}/${HOSTNAME}/InstallResults.txt | grep ${DIRECTORY} | wc -l` -gt 0 ] ; then
+				Logger "[ERROR]" "We cannot do a full build as we already have an install in the ${DIRECTORY} directory!!! - Exiting script!!!!!"
+				OkToProcess="FALSE"
+				UnMountLogOutput
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE} as we already have an install in the default location"
+			else
+				OkToProcess="TRUE"
+				UnMountLogOutput
+			fi
+		else
+			OkToProcess="TRUE"
+		fi
+    ;;	
+	PATCH-${VERSION})
+		Logger "[SUMMARY]" "This is a PATCH-${VERSION}"
+		#Check to see if we have the correct BASE version and the FP level is greater than the installed version
+		if  [ "${localMQInstalled}" = "TRUE" ] ; then
+			Logger "[SUMMARY]" "The version to install needs to be of the same Release/Modification... and at a greater FP level than the one installed......"
+						
+			if [ "${MQINSTALLEDVERSION}" = "${VERSION}" ] ; then
+				Logger "[SUMMARY]" "We already have this version installed.....not doing anything here!!"
+				OkToProcess="FALSE"
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We already have this version installed - ${MQINSTALLEDVERSION}, trying to update with ${VERSION}"
+			fi
+			Logger "[SUMMARY]" "Installed Major version = ${INSTALLEDMAJORVERSION}"
+			Logger "[SUMMARY]" "Major version = ${MAJORVERSION}"
+			Logger "[SUMMARY]" "Installed Release version = ${INSTALLEDRELEASEVERSION}"
+			Logger "[SUMMARY]" "Release version = ${RELEASEVERSION}"
+			Logger "[SUMMARY]" "Installed Modification version = ${INSTALLEDMODIFICATIONVERSION}"
+			Logger "[SUMMARY]" "Modification version = ${MODIFICATIONVERSION}"
+			Logger "[SUMMARY]" "Installed FP version = ${INSTALLEDFIXPACKVERSION}"
+			Logger "[SUMMARY]" "FP version = ${FIXPACKVERSION}"
+			if [ "${INSTALLEDMAJORVERSION}" = "${MAJORVERSION}" ] && [ "${INSTALLEDRELEASEVERSION}" = "${RELEASEVERSION}" ] && [ "${INSTALLEDMODIFICATIONVERSION}" = "${MODIFICATIONVERSION}" ] ; then
+				Logger "[SUMMARY]" "We have matching versions of base builds, checking FP Levels...."
+				if [ "${INSTALLEDFIXPACKVERSION}" = "${FIXPACKVERSION}" ] ; then
+					Logger "[SUMMARY]" "The FP version to install is older that the one already installed!!!"
+					OkToProcess="FALSE"
+					ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "The FP version to install is older that the one already installed:- ${MQINSTALLEDVERSION}, trying to update with ${VERSION}"
+				else
+					OkToProcess="TRUE"
+					Logger "[SUMMARY]" "All ok to install this Version/FP."
+				fi
+			else
+				Logger "[ERROR]" "We have incorrect base install versions. Installed - ${MQINSTALLEDVERSION}, trying to update with ${VERSION}"
+				OkToProcess="FALSE"
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We have incorrect base install versions. Installed - ${MQINSTALLEDVERSION}, trying to update with ${VERSION}"
+			fi
+			
+		else
+			Logger "[ERROR]" "We do not have a base install of MQ  - We cant add a patch...."
+			OkToProcess="FALSE"
+			ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE} as we have no installed base versions of MQ."
+		fi
+	;;
+	
+	UNINSTALL-FP-${VERSION})
+		Logger "[SUMMARY]" "This is a UNINSTALL-FP-${VERSION}"
+		#Check see if the FP version exists and is the latest one installed
+		
+		if [ `rpm -qa | grep -i MQSeries | grep ${VERSION} | wc -l` -gt 0 ]  ; then
+			if [ "${MQINSTALLEDVERSION}" = "${VERSION}" ] ; then
+				OkToProcess="TRUE"
+				Logger "[SUMMARY]" "All ok to uninstall this FP."
+			else
+				OkToProcess="FALSE"
+				Logger "[ERROR]" "We cannot uninstall this FIXPACK - version to uninstall needs to be ${MQINSTALLEDVERSION}"
+				ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE}, We cannot uninstall this FIXPACK - version to uninstall needs to be ${MQINSTALLEDVERSION}"
+			fi
+		else
+			Logger "[ERROR]" "We have no rpm installations for MQ Fixpack ${VERSION}, current installed version is ${MQINSTALLEDVERSION}"
+			OkToProcess="FALSE"
+			ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE}, we have no rpm installations for MQ Fixpack ${VERSION}, current installed version is ${MQINSTALLEDVERSION}"
+		fi
+	;;
+	
+	CLIENT)
+		Logger "[SUMMARY]" "This is a CLIENT"
+		#Check to see if there is not already a full build
+		if  [ "${localMQInstalled}" = "TRUE" ] ; then 
+			Logger "[ERROR]" "We cannot do a full build as we already have an install in the default location - Exiting script!!!!!"
+			OkToProcess="FALSE"
+			ExitProcedure 2 WMQApplyMaintenance IsOKToProcess "We cannot do a ${LOG_ACTIONTYPE} as we already have an install in the default location"
+		else
+			OkToProcess="TRUE"
+		fi
+	;;
+	\?)
+        ExitProcedure 1 WMQApplyMaintenance IsOKToProcess "Invalid flag specifed: ${LOG_ACTIONTYPE}"
+    ;;
+    esac
+}
+
+
+#SPECIFIC GLOBAL VARS 
+
+export IFS=`echo -en "\n\b"`
+
+export MYSCRIPT=`basename ${0}`
+export DEBUG=/dev/null; >${DEBUG}
+export MYWORKDIR=/tmp/${MYSCRIPT}.`date +%Y%m%d%H%M%S`.${$}
+export MYLOG=/tmp/${MYSCRIPT}.log
+export STDIN=${MYWORKDIR}/stdin
+export OUTPUTFILE=${MYWORKDIR}/output
+export TMPFILE=${MYWORKDIR}/temp
+export TMPDIR=/var/mqm
+export INSTALLTYPE=""
+
+
+#USER SPECIFIC GLOBAL VARS 
+export LOCAL_WMQ_INSTALL=/software/${MYSCRIPT}
+export LOCAL_WMQ_WORKDIR=/software/${MYSCRIPT}/WMQ
+
+export REPEATER_WMQ_SOFTWARE=/backup/sysmdt/WMQ
+export MOUNT_WMQ_SOFTWARE=/software/mnt/${MYSCRIPT}/WMQSoftware
+
+export REPEATER_WMQ_INSTALL=/backup/sysmdt/WMQ/MQMaint
+export MOUNT_WMQ_INSTALL=/software/mnt/${MYSCRIPT}/MQMaint
+
+export REPEATER_WMQ_BACKUP=/backup/sysmdt/WMQ/MQMaint/backup
+export MOUNT_WMQ_BACKUP=/software/mnt/${MYSCRIPT}/MQMaint/backup
+
+export PATH=${PATH}:/usr/local/bin/
+export HOSTNAME=`hostname`
+export DEFAULTINSTALLDIR="/opt/mqm"
+
+
+
+#TEMPLATE INITIALISATION 
+mkdir -p ${MYWORKDIR} 1>${DEBUG} 2>&1
+
+#options with a colon *after* them need to have an argument
+#options with a space *after* them do not need to have an argument - typically used for flags as shown below
+#The colon in front of the string turns off error-messages
+export VALIDARGS="f u p x i v: b d: n: l:"
+while getopts "${VALIDARGS}" ARG; do
+    case ${ARG} in
+    f)
+        export FULLBUILD="true"
+    ;;
+    u)
+        export UNINSTALL="true"
+    ;;
+    p) 
+		export PATCH="true"
+	;;
+	x)
+		export INTERIMFIX="true"
+	;;
+	i) 
+		export CLIENT="true"
+	;;
+	v)
+		export VERSION="${OPTARG}"
+	;;
+	b)
+		export BACKUP="true"
+	;;
+	d)
+		export DIRECTORY="${OPTARG}"
+	;;
+	n)
+		export INSTALLNUMBER="${OPTARG}"
+	;;
+	l)
+		export INSTALLATIONNAME="${OPTARG}"
+	;;
+	\?)
+        ExitProcedure 1 GETOPTS001 getopts "Invalid flag specifed: ${ARG}"
+    ;;
+    esac
+done
+
+
+#USER INITIALISATION 
+
+#Validate arguments
+
+if [ "${FULLBUILD}" = "" ]  && [ "${UNINSTALL}" = "" ] && [ "${PATCH}" = "" ] && [ "${INTERIMFIX}" = "" ] && [ "${CLIENT}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You must specify either a Full Install (-f), Uninstall (-u), Interim Fix (-x), Client (-i) or a Fix Pack (-p) install!!!"
+fi
+
+if [ "${FULLBUILD}" = "true" ] && [ "${VERSION}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You must specify a version (-v 7.0.1.7/7.1.0.3/7.5.0.2)  if doing a Full Install (-f)"	
+else
+	if [ -n "${VERSION}" ] ; then
+		export FIXPACKVERSION=`echo ${VERSION} | awk -F "." '{ print $4 }'`
+		export MAJORVERSION=`echo ${VERSION} | awk -F "." '{ print $1 }'`
+		export MODIFICATIONVERSION=`echo ${VERSION} | awk -F "." '{ print $1"."$2"."$3 }'`
+		export RELEASEVERSION=`echo ${VERSION} | awk -F "." '{ print $1"."$2 }'`
+	fi
+fi
+
+if [ "${PATCH}" = "true" ] && [ "${VERSION}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You must specify a fixpack version (-v 7.0.x.x/7.1.x.x/7.5.x.x)  if doing a FixPack install (-p)"	
+fi
+
+if [ "${INTERIMFIX}" = "true" ] && [ "${VERSION}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You must specify a fixpack version (-v 7.0.x.x/7.1.x.x/7.5.x.x)  if applying and Interim fix."	
+fi
+
+if [ "${INTERIMFIX}" = "true" ] && [ "${DIRECTORY}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "Please specify a directory where the Installation resides ( -d {Directory Name})"	
+fi
+
+if [ "${PATCH}" = "true" ] && [ "${CLIENT}" = "true" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You cannot specify a patch on a client install!!! - not yet."	
+fi
+
+if [ "${INTERIMFIX}" = "true" ] && [ "${CLIENT}" = "true" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You cannot specify an interim fix on a client install!!!"	
+fi
+
+if [ "${PATCH}" = "true" ] && [ "${INSTALLATIONNAME}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "Please specify an Installation to upgrade ( -l {Installation Name})"	
+fi
+
+if [ "${CLIENT}" = "true" ] && [ "${VERSION}" = "" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You must specify a fixpack version (-v 7.0.x.x/7.1.x.x/7.5.x.x)  if doing a Client install (-i)"	
+fi
+
+if [ "${FULLBUILD}" = "true" ] && [ "${CLIENT}" = "true" ] ; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "You cannot specify a FULLBUILD and a CLIENT install!!!!"	
+fi
+
+if [ "${UNINSTALL}" = "true" ] && [ "${INSTALLATIONNAME}" = "" ]; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "Please specify an Installation to uninstall ( -l {Installation Name})"
+fi
+
+if [ "${UNINSTALL}" = "true" ] && [ "${DIRECTORY}" = "" ]; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "Please specify a directory where the Installation resides ( -d {Directory Name})"
+fi
+
+if [ "${INTERIMFIX}" = "true" ] && [ "${DIRECTORY}" = "" ]; then
+	ExitProcedure 1 VALIDATEARGS  validateargs  "Please specify a directory where the Installation resides ( -d {Directory Name})"
+fi
+
+if  [ ! "${INSTALLATIONNAME}" = "" ]; then
+	Logger "[SUMMARY]" "Checking to see if we have an Installation with that name....."
+	if [ `su - mqm -c "${DIRECTORY}/bin/dspmqver -i" | grep -i ${INSTALLATIONNAME} | wc -l` -gt 0 ] ; then
+		Logger "[SUMMARY]" "Installation found, continuing with uninstall....."
+	else
+		Logger "[ERROR]" "We do not have an Installation with that name...ending uninstall."
+		ExitProcedure 1 VALIDATEARGS  validateargs  "We do not have an Installation with that name...ending uninstall."
+	fi
+fi
+
+if [ "${FULLBUILD}" = "true" ] && [ "${DIRECTORY}" = "" ]; then
+	#Check to see if the /opt/mqm Directory is empty, is set it to this
+	if [ "$(ls -A $DEFAULTINSTALLDIR)" ]; then
+      Logger "[ERROR]" "Default install directory $DEFAULTINSTALLDIR is not Empty, please specify an install directory!!!"
+	  ExitProcedure 1 VALIDATEARGS  validateargs  "Default install directory $DEFAULTINSTALLDIR is not Empty, please specify an install directory!!!"
+	else
+		Logger "[SUMMARY]" "$DEFAULTINSTALLDIR is Empty, we will install into here"
+		DIRECTORY=$DEFAULTINSTALLDIR
+	fi
+fi
+if [ "${FULLBUILD}" = "true" ] && [ ! "${DIRECTORY}" = "" ]; then
+	#Check to see if the passed in  Directory is empty
+	if [ "$(ls -A $DIRECTORY)" ]; then
+	  Logger "[ERROR]" "Install directory $DIRECTORY is not Empty, please specify an empty install directory!!!"
+	  ExitProcedure 1 VALIDATEARGS  validateargs  "Install directory $DIRECTORY is not Empty, please specify an empty install directory!!!"
+	else
+		Logger "[SUMMARY]" "$DIRECTORY is Empty, we will install into here"
+	fi
+fi
+
+if [ "${INSTALLNUMBER}" = "" ] || [ "${INSTALLNUMBER}" = "0" ]  ; then
+	#We need atleast one of these values set
+	Logger "[ERROR]" "INSTALLNUMBER cannot be blank or zero!!!"
+	ExitProcedure 1 VALIDATEARGS  validateargs  "INSTALLNUMBER cannot be blank or zero!!!"
+fi
+
+
+Logger "<---[START]" "Starting with below arguments"
+Logger "[INPUT]" "FULLBUILD [${FULLBUILD}]"
+Logger "[INPUT]" "UNINSTALL [${UNINSTALL}]"
+Logger "[INPUT]" "PATCH [${PATCH}]"
+Logger "[INPUT]" "VERSION [${VERSION}]"
+Logger "[INPUT]" "BACKUP [${BACKUP}]"
+Logger "[INPUT]" "DIRECTORY [${DIRECTORY}]"
+Logger "[INPUT]" "INSTALLNUMBER [${INSTALLNUMBER}]"
+Logger "[INPUT]" "INSTALLATIONNAME [${INSTALLATIONNAME}]"
+Logger "[INPUT]" "INTERIMFIX [${INTERIMFIX}]"
+
+
+#MAIN PROGRAM 
+
+if [ "${FULLBUILD}" =  "true" ] ; then
+	LOG_ACTIONTYPE="FULLBUILD-${VERSION}"
+	IsOKToProcess
+	MQInstall
+fi
+
+if [ "${PATCH}" =  "true" ] ; then
+	LOG_ACTIONTYPE="PATCH-${VERSION}"
+	IsOKToProcess
+	PatchMQ
+fi
+
+if [ "${UNINSTALL}" = "true" ] && [ "${INTERIMFIX}" = ""  ]; then
+	if [ -z ${VERSION} ] ; then
+		LOG_ACTIONTYPE="UNINSTALL-FULL"
+		IsOKToProcess
+		UninstallMQ
+	else 
+		LOG_ACTIONTYPE="UNINSTALL-FP-${VERSION}"
+		IsOKToProcess
+		UninstallMQFixPack ${VERSION}
+	fi
+fi
+
+if [ "${CLIENT}" =  "true" ] ; then
+	LOG_ACTIONTYPE="CLIENT-${VERSION}"
+	IsOKToProcess
+	ClientMQ
+fi
+
+if [ "${INTERIMFIX}" =  "true" ] ; then
+	GetLocalOSType
+	GetMQFixPackPatchFiles
+	if [ "${UNINSTALL}" = "true" ] ; then
+		LOG_ACTIONTYPE="UNINSTALLINTERIMFIX-${VERSION}"
+		IsOKToProcess
+		UnInstallMQPatch
+	else
+		LOG_ACTIONTYPE="INSTALLINTERIMFIX-${VERSION}"
+		IsOKToProcess
+		InstallMQPatch
+	fi 
+fi
+
+LogOutput
+
+
+#END 
+
+rm -rf ${MYWORKDIR}
+
+RemoveInstallItems
+
+exit
+
